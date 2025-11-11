@@ -44,11 +44,29 @@ DB Start is a simple Fyne GUI application designed to manage the status of commo
     cd dbstat
     ```
 
-2.  **Build and run**:
-    ```/dev/null/build_and_run.sh
-    go mod tidy
-    go run main.go
+2.  **Build the application**:
+
+    This script compiles the application and creates an executable binary in the `build/` directory, along with a desktop entry and icon.
+
+    ```dbstat/build.sh
+    ./build.sh
     ```
+
+3.  **Install the application (optional)**:
+
+    This script installs the built application, its desktop entry, and icon into your user's local directories (`~/.local/bin`, `~/.local/share/applications`, `~/.local/share/icons`). This makes it available in your system's application menu.
+
+    ```dbstat/install.sh
+    ./install.sh
+    ```
+
+4.  **Run the application**:
+    - If you ran `./install.sh`, you can find "DB Stat Manager" in your desktop environment's application menu.
+    - Alternatively, you can run the application directly from the build directory:
+
+      ```/dev/null/run_from_build.sh
+      ./build/dbstat
+      ```
 
 ## Usage
 
