@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	"image/color"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -34,16 +34,110 @@ func findUnit(prefixes []string) (string, bool) {
 	return "", false
 }
 
-/* ----------  discover port from listening socket  ---------- */
+/* ----------  discover PID from systemd service  ---------- */
 
-func listeningPort(pid string) int {
-	// line that contains the PID
-	line := run("sh", "-c", "ss -lntup 2>/dev/null | grep -E '\\bpid='+pid+'\\b'")
-	// pick the first *:PORT part
-	re := regexp.MustCompile(`:(\d+)\s+.*\bpid=` + pid + `\b`)
-	if m := re.FindStringSubmatch(line); len(m) == 2 {
-		if p, e := strconv.Atoi(m[1]); e == nil {
-			return p
+func getServicePID(unit string) string {
+	// Method 1: Try systemctl show with different properties
+	pid := run("systemctl", "show", unit, "--property=MainPID", "--value")
+	if pid != "" && pid != "0" {
+		return pid
+	}
+
+	// Method 2: Try systemctl status and parse output
+	status := run("systemctl", "status", unit)
+	if status != "" {
+		// Look for "Main PID: 1234" in status output
+		re := regexp.MustCompile(`Main PID:\s+(\d+)`)
+		if matches := re.FindStringSubmatch(status); len(matches) == 2 {
+			return matches[1]
+		}
+	}
+
+	return ""
+}
+
+/* ----------  discover port using netstat with PID or service name  ---------- */
+
+func listeningPort(pid string, serviceName string) int {
+	// Remove .service suffix if present
+	serviceName = strings.TrimSuffix(serviceName, ".service")
+
+	// Method 1: Use netstat with PID (most accurate)
+	if pid != "" && pid != "0" {
+		cmd := fmt.Sprintf("netstat -plnt | grep %s", pid)
+		out := run("sh", "-c", cmd)
+
+		if out != "" {
+			port := extractPortFromNetstat(out)
+			if port != 0 {
+				return port
+			}
+		}
+	}
+
+	// Method 2: Use netstat with service name (fallback)
+	cmd := fmt.Sprintf("netstat -plnt | grep %s", serviceName)
+	out := run("sh", "-c", cmd)
+
+	if out != "" {
+		port := extractPortFromNetstat(out)
+		if port != 0 {
+			return port
+		}
+	}
+
+	// Method 3: Use default ports based on service name
+	switch {
+	case strings.Contains(serviceName, "postgres"):
+		return 5432
+	case strings.Contains(serviceName, "mysql"), strings.Contains(serviceName, "mariadb"):
+		return 3306
+	case strings.Contains(serviceName, "redis"):
+		return 6379
+	}
+
+	return 0
+}
+
+/* ----------  extract port from netstat output  ---------- */
+
+func extractPortFromNetstat(netstatOutput string) int {
+	lines := strings.Split(netstatOutput, "\n")
+	for _, line := range lines {
+		// Look for port pattern in format :5432
+		re := regexp.MustCompile(`:(\d+)\s`)
+		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
+			if port, err := strconv.Atoi(matches[1]); err == nil {
+				return port
+			}
+		}
+
+		// Alternative pattern for different netstat formats
+		re = regexp.MustCompile(`0\.0\.0\.0:(\d+)`)
+		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
+			if port, err := strconv.Atoi(matches[1]); err == nil {
+				return port
+			}
+		}
+
+		re = regexp.MustCompile(`127\.0\.0\.1:(\d+)`)
+		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
+			if port, err := strconv.Atoi(matches[1]); err == nil {
+				return port
+			}
+		}
+
+		re = regexp.MustCompile(`::1:(\d+)`)
+		if matches := re.FindStringSubmatch(line); len(matches) > 1 {
+			if port, err := strconv.Atoi(matches[1]); err == nil {
+				return port
+			}
+		}
+		re = regexp.MustCompile(`\.(\d+)$`)
+		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
+			if port, err := strconv.Atoi(matches[1]); err == nil {
+				return port
+			}
 		}
 	}
 	return 0
@@ -59,9 +153,6 @@ type engine struct {
 	icon       fyne.Resource
 }
 
-//go:embed assets/icon.svg
-var appIcon []byte
-
 //go:embed assets/postgres.svg
 var postgresSvg []byte
 
@@ -76,7 +167,7 @@ var engines = []engine{
 		name:       "PostgreSQL",
 		prefixes:   []string{"postgresql", "postgres"},
 		processPat: "postgres",
-		icon:       fyne.NewStaticResource("postgres.svg", postgresSvg), // see embed section below
+		icon:       fyne.NewStaticResource("postgres.svg", postgresSvg),
 	},
 	{
 		name:       "MySQL",
@@ -101,35 +192,62 @@ type row struct {
 	port   int
 	status string
 
-	logo  *widget.Icon
-	title *widget.Label
-	stat  *widget.Label
-	btn   *widget.Button
+	logo      *widget.Icon
+	title     *widget.Label
+	stat      *widget.Label
+	btn       *widget.Button
+	portLabel *widget.Label
 
 	card *fyne.Container
+	bg   *canvas.Rectangle
 }
 
 func (r *row) buildUI() {
-	bg := canvas.NewCircle(color.NRGBA{R: 35, G: 35, B: 35, A: 255})
-	r.logo = widget.NewIcon(r.engine.icon)
-	r.logo.Resize(fyne.NewSize(24, 24))
-	r.title = widget.NewLabel("")
-	r.stat = widget.NewLabel("")
-	r.btn = widget.NewButton("", nil)
+	// Create a light background for the card
+	r.bg = canvas.NewRectangle(fyne.CurrentApp().Settings().Theme().Color("button", 0))
+	r.bg.CornerRadius = 8
 
-	sizedIcon := container.NewCenter(
-		container.NewPadded(
-			container.NewStack(bg, r.logo),
+	r.logo = widget.NewIcon(r.engine.icon)
+	r.logo.Resize(fyne.NewSize(32, 32))
+
+	r.title = widget.NewLabel(r.engine.name)
+	r.title.TextStyle = fyne.TextStyle{Bold: true}
+
+	r.stat = widget.NewLabel("Checking...")
+	r.stat.Alignment = fyne.TextAlignCenter
+
+	r.portLabel = widget.NewLabel("")
+	r.portLabel.Alignment = fyne.TextAlignCenter
+
+	r.btn = widget.NewButton("Refresh", nil)
+	r.btn.Importance = widget.MediumImportance
+
+	// Content container
+	content := container.NewHBox(
+		container.NewPadded(container.NewCenter(r.logo)),
+		container.NewVBox(
+			r.title,
+			container.NewHBox(
+				widget.NewLabel("Port:"),
+				r.portLabel,
+			),
+		),
+		layout.NewSpacer(),
+		container.NewVBox(
+			container.NewHBox(
+				widget.NewLabel("Status:"),
+				r.stat,
+			),
+			r.btn,
 		),
 	)
 
-	r.card = container.NewGridWithColumns(4,
-		sizedIcon,
-		container.NewCenter(r.title),
-		container.NewCenter(r.stat),
-		container.NewCenter(r.btn),
+	// Card container with background and padding
+	r.card = container.NewStack(
+		r.bg,
+		container.NewPadded(content),
 	)
-	r.card.Resize(fyne.NewSize(0, 32))
+
 	r.updateUI()
 }
 
@@ -138,14 +256,11 @@ func (r *row) refresh() {
 	r.status = run("systemctl", "is-active", r.unit)
 
 	// PID
-	r.pid = run("systemctl", "show", r.unit, "-p", "MainPID", "--value")
-	if r.pid == "0" {
-		r.pid = ""
-	}
+	r.pid = getServicePID(r.unit)
 
-	// port
-	if r.pid != "" {
-		r.port = listeningPort(r.pid)
+	// port - using both PID and service name
+	if r.status == "active" {
+		r.port = listeningPort(r.pid, r.unit)
 	} else {
 		r.port = 0
 	}
@@ -156,35 +271,53 @@ func (r *row) refresh() {
 
 func (r *row) updateUI() {
 	status := r.status
-	if status == "active" {
-		status = "running"
-	}
-	full := r.engine.name
-	if r.port != 0 {
-		full = fmt.Sprintf("%s : %d", r.engine.name, r.port)
-	}
-	r.title.SetText(full)
-	r.stat.SetText(status)
+	statusText := status
+	var btnText string
+	var importance widget.ButtonImportance
 
 	switch r.status {
 	case "active":
-		r.btn.SetText("Stop")
+		statusText = "Running"
+		btnText = "Stop"
+		importance = widget.DangerImportance
 		r.btn.OnTapped = func() {
 			run("pkexec", "systemctl", "stop", r.unit)
 			r.refresh()
 		}
-	case "inactive", "failed":
-		r.btn.SetText("Start")
+	case "inactive":
+		statusText = "Stopped"
+		btnText = "Start"
+		importance = widget.HighImportance
 		r.btn.OnTapped = func() {
 			run("pkexec", "systemctl", "start", r.unit)
 			r.refresh()
 		}
-	default:
-		r.btn.SetText("Restart")
+	case "failed":
+		statusText = "Failed"
+		btnText = "Restart"
+		importance = widget.WarningImportance
 		r.btn.OnTapped = func() {
 			run("pkexec", "systemctl", "restart", r.unit)
 			r.refresh()
 		}
+	default:
+		statusText = "Unknown"
+		btnText = "Refresh"
+		importance = widget.MediumImportance
+		r.btn.OnTapped = func() {
+			r.refresh()
+		}
+	}
+
+	r.stat.SetText(statusText)
+	r.btn.SetText(btnText)
+	r.btn.Importance = importance
+
+	// Update port display
+	if r.port != 0 {
+		r.portLabel.SetText(fmt.Sprintf("%d", r.port))
+	} else {
+		r.portLabel.SetText("-")
 	}
 }
 
@@ -192,48 +325,70 @@ func (r *row) updateUI() {
 
 func main() {
 	a := app.New()
-	w := a.NewWindow("DB stat")
-	// Set application icon
-	icon := fyne.NewStaticResource("icon.svg", appIcon)
-	w.SetIcon(icon)
-	w.Resize(fyne.NewSize(480, 140))
-	w.SetFixedSize(true) // <--  disables resize
-	w.CenterOnScreen()
+	w := a.NewWindow("Database Manager")
+	w.Resize(fyne.NewSize(600, 400))
+	w.SetFixedSize(false)
 
-	// Then in main after window creation:
-	w.SetCloseIntercept(func() {
-		// This sometimes helps with window management
-		w.Hide()
-	})
-
-	grid := container.NewGridWithColumns(1)
-	grid.Objects = nil
+	// Create rows
 	var rows []*row
+	grid := container.NewGridWithColumns(1)
 
+	// Create rows for each detected engine
 	for _, eng := range engines {
 		unit, ok := findUnit(eng.prefixes)
 		if !ok {
 			continue
 		}
 		r := &row{engine: eng, unit: unit}
-		r.buildUI() // real widgets first
+		r.buildUI()
 		grid.Add(r.card)
 		rows = append(rows, r)
 	}
 
 	if len(rows) == 0 {
-		grid.Add(widget.NewLabel("No supported database engines found"))
+		noServices := widget.NewLabel("No supported database services found")
+		noServices.Alignment = fyne.TextAlignCenter
+		grid.Add(noServices)
 	}
 
-	// w.SetContent(container.NewScroll(grid))
+	// Clean header with just title and refresh button
+	title := widget.NewLabel("Database Services Manager")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Alignment = fyne.TextAlignCenter
 
-	// initial population
+	refreshAllBtn := widget.NewButton("Refresh All", nil)
+
+	header := container.NewHBox(
+		container.NewCenter(title),
+		layout.NewSpacer(),
+		refreshAllBtn,
+	)
+
+	// Set up refresh all button
+	refreshAllBtn.OnTapped = func() {
+		for _, r := range rows {
+			r.refresh()
+		}
+	}
+
+	// Initial population
 	for _, r := range rows {
 		r.refresh()
 	}
+
+	// Scrollable content with proper spacing
 	scroll := container.NewScroll(grid)
-	scroll.SetMinSize(fyne.NewSize(480, 140)) // 140 logical-pixels high list
-	w.SetContent(scroll)
+	scroll.SetMinSize(fyne.NewSize(580, 300))
+
+	// Main container with padding and spacing
+	content := container.NewVBox(
+		header,
+		widget.NewSeparator(),
+		scroll,
+	)
+
+	paddedContent := container.NewPadded(content)
+	w.SetContent(paddedContent)
 
 	w.ShowAndRun()
 }

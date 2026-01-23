@@ -16,8 +16,8 @@ mkdir -p $LOCAL_ICONS
 
 # Check if build exists
 if [ ! -f "$BUILD_DIR/$APP_NAME" ]; then
-    echo "Error: Build not found. Run ./build.sh first."
-    exit 1
+  echo "Error: Build not found. Run ./build.sh first."
+  exit 1
 fi
 
 # Copy binary
@@ -27,13 +27,13 @@ chmod +x "$LOCAL_BIN/$APP_NAME"
 
 # Copy icon if exists
 if [ -f "$BUILD_DIR/icon.png" ]; then
-    echo "Installing icon..."
-    cp "$BUILD_DIR/icon.png" "$LOCAL_ICONS/$APP_NAME.png"
+  echo "Installing icon..."
+  cp "$BUILD_DIR/icon.png" "$LOCAL_ICONS/$APP_NAME.png"
 fi
 
 # Create desktop file
 echo "Creating desktop entry..."
-cat > "$LOCAL_APPS/$APP_NAME.desktop" << EOF
+cat >"$LOCAL_APPS/$APP_NAME.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
