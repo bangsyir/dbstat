@@ -1,8 +1,6 @@
 package main
 
 import (
-	"container/list"
-	_ "embed"
 	"fmt"
 	"image/color"
 	"os/exec"
@@ -19,465 +17,372 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-/* ----------  tiny helper  ---------- */
-
-func run(args ...string) string {
-	out, _ := exec.Command(args[0], args[1:]...).Output()
-	return strings.TrimSpace(string(out))
+type DBService struct {
+	Name   string
+	Type   string
+	Unit   string
+	Status string
+	PID    string
+	Port   int
+	Color  string
 }
 
-/* ----------  logger  ---------- */
-
-type logger struct {
-	text *container.Scroll
-	list *list.List
+type ActivityEntry struct {
+	Time  string
+	Level string
+	Msg   string
+	Color color.Color
 }
 
 var (
-	logInfoColor  = &color.RGBA{R: 16, G: 185, B: 129, A: 255}
-	logWarnColor  = &color.RGBA{R: 245, G: 158, B: 11, A: 255}
-	logErrorColor = &color.RGBA{R: 239, G: 68, B: 68, A: 255}
+	serviceRows []serviceRowInfo
+	activity    []ActivityEntry
+	activityBox *fyne.Container
+	serviceList *container.Scroll
+	isDarkMode  = true
 )
 
-func newLogger() *logger {
-	l := &logger{}
-	l.list = list.New()
-	vbox := container.NewVBox()
-	scroll := container.NewScroll(vbox)
-	scroll.Direction = fyne.ScrollVerticalOnly
-	l.text = scroll
-	return l
+type serviceRowInfo struct {
+	svc    *DBService
+	row    *fyne.Container
+	name   *canvas.Text
+	status *canvas.Text
+	port   *canvas.Text
+	btn    *widget.Button
 }
 
-func (l *logger) Add(level string, levelColor color.Color, format string, args ...interface{}) {
-	if l == nil || l.text == nil {
-		return
-	}
-	timestamp := time.Now().Format("15:04:05")
-	msg := fmt.Sprintf(format, args...)
-	entry := fmt.Sprintf("[%s] %s: %s", timestamp, level, msg)
-
-	text := canvas.NewText(entry, levelColor)
-	text.TextStyle = fyne.TextStyle{Monospace: true}
-	text.TextSize = 12
-
-	vbox := l.text.Content.(*fyne.Container)
-	children := vbox.Objects
-	children = append(children, text)
-	vbox.Objects = children
-
-	if l.list.Len() > 100 {
-		l.list.Remove(l.list.Front())
-	}
-
-	if fyne.CurrentApp() != nil {
-		l.text.Refresh()
-	}
+func run(args ...string) string {
+	cmd := exec.Command(args[0], args[1:]...)
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
 }
 
-func (l *logger) Info(format string, args ...interface{}) {
-	l.Add("INFO", logInfoColor, format, args...)
-}
-
-func (l *logger) Warn(format string, args ...interface{}) {
-	l.Add("WARN", logWarnColor, format, args...)
-}
-
-func (l *logger) Error(format string, args ...interface{}) {
-	l.Add("ERROR", logErrorColor, format, args...)
-}
-
-var appLogger *logger
-
-/* ----------  discover systemd unit  ---------- */
-
-func findUnit(prefixes []string) (string, bool) {
+func findUnit(prefixes []string) string {
 	for _, p := range prefixes {
-		if out := run("systemctl", "list-unit-files", p+"*.service", "-q", "--no-legend"); out != "" {
-			return strings.Fields(out)[0], true
+		out := run("systemctl", "list-unit-files", p+"*.service", "-q", "--no-legend")
+		if out != "" {
+			return strings.Fields(out)[0]
 		}
 	}
-	return "", false
+	return ""
 }
-
-/* ----------  discover PID from systemd service  ---------- */
 
 func getServicePID(unit string) string {
 	pid := run("systemctl", "show", unit, "--property=MainPID", "--value")
 	if pid != "" && pid != "0" {
 		return pid
 	}
-
 	status := run("systemctl", "status", unit)
 	if status != "" {
 		re := regexp.MustCompile(`Main PID:\s+(\d+)`)
-		if matches := re.FindStringSubmatch(status); len(matches) == 2 {
-			return matches[1]
+		if m := re.FindStringSubmatch(status); len(m) == 2 {
+			return m[1]
 		}
 	}
-
 	return ""
 }
 
-/* ----------  discover port using netstat with PID or service name  ---------- */
-
-func listeningPort(pid string, serviceName string) int {
-	serviceName = strings.TrimSuffix(serviceName, ".service")
+func getPort(pid, unit string) int {
+	unit = strings.TrimSuffix(unit, ".service")
 
 	if pid != "" && pid != "0" {
-		cmd := fmt.Sprintf("netstat -plnt | grep %s", pid)
-		out := run("sh", "-c", cmd)
-
-		if out != "" {
-			port := extractPortFromNetstat(out)
-			if port != 0 {
-				return port
-			}
+		out := run("sh", "-c", fmt.Sprintf("netstat -plnt 2>/dev/null | grep %s", pid))
+		if p := extractPort(out); p > 0 {
+			return p
 		}
 	}
 
-	cmd := fmt.Sprintf("netstat -plnt | grep %s", serviceName)
-	out := run("sh", "-c", cmd)
-
-	if out != "" {
-		port := extractPortFromNetstat(out)
-		if port != 0 {
-			return port
-		}
+	out := run("sh", "-c", fmt.Sprintf("netstat -plnt 2>/dev/null | grep %s", unit))
+	if p := extractPort(out); p > 0 {
+		return p
 	}
 
 	switch {
-	case strings.Contains(serviceName, "postgres"):
+	case strings.Contains(unit, "postgres"):
 		return 5432
-	case strings.Contains(serviceName, "mysql"), strings.Contains(serviceName, "mariadb"):
+	case strings.Contains(unit, "mysql"), strings.Contains(unit, "mariadb"):
 		return 3306
-	case strings.Contains(serviceName, "redis"):
+	case strings.Contains(unit, "redis"):
 		return 6379
 	}
-
 	return 0
 }
 
-/* ----------  extract port from netstat output  ---------- */
-
-func extractPortFromNetstat(netstatOutput string) int {
-	lines := strings.Split(netstatOutput, "\n")
-	for _, line := range lines {
-		re := regexp.MustCompile(`:(\d+)\s`)
-		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
-			if port, err := strconv.Atoi(matches[1]); err == nil {
-				return port
-			}
-		}
-
-		re = regexp.MustCompile(`0\.0\.0\.0:(\d+)`)
-		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
-			if port, err := strconv.Atoi(matches[1]); err == nil {
-				return port
-			}
-		}
-
-		re = regexp.MustCompile(`127\.0\.0\.1:(\d+)`)
-		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
-			if port, err := strconv.Atoi(matches[1]); err == nil {
-				return port
-			}
-		}
-
-		re = regexp.MustCompile(`::1:(\d+)`)
-		if matches := re.FindStringSubmatch(line); len(matches) > 1 {
-			if port, err := strconv.Atoi(matches[1]); err == nil {
-				return port
-			}
-		}
-		re = regexp.MustCompile(`\.(\d+)$`)
-		if matches := re.FindStringSubmatch(line); len(matches) == 2 {
-			if port, err := strconv.Atoi(matches[1]); err == nil {
-				return port
-			}
+func extractPort(out string) int {
+	if out == "" {
+		return 0
+	}
+	re := regexp.MustCompile(`:(\d+)`)
+	matches := re.FindAllStringSubmatch(out, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		if p, err := strconv.Atoi(matches[i][1]); err == nil && p > 1024 {
+			return p
 		}
 	}
 	return 0
 }
 
-/* ----------  engine descriptor  ---------- */
-
-type engine struct {
-	name       string
-	unit       string
-	prefixes   []string
-	processPat string
-	icon       fyne.Resource
-	color      string
+func getServiceStatus(unit string) string {
+	return run("systemctl", "is-active", unit)
 }
 
-//go:embed assets/postgres.svg
-var postgresSvg []byte
+func detectServices() []*DBService {
+	engines := []struct {
+		Name     string
+		Type     string
+		Prefixes []string
+		Color    string
+	}{
+		{"PostgreSQL", "postgres", []string{"postgresql", "postgres"}, "#336791"},
+		{"MySQL", "mysql", []string{"mysql", "mariadb"}, "#00758F"},
+		{"Redis", "redis", []string{"redis", "redis-server"}, "#DC382D"},
+	}
 
-//go:embed assets/mysql.svg
-var mysqlSvg []byte
+	var result []*DBService
 
-//go:embed assets/redis.svg
-var redisSvg []byte
+	for _, eng := range engines {
+		unit := findUnit(eng.Prefixes)
+		if unit == "" {
+			continue
+		}
+		svc := &DBService{
+			Name: eng.Name,
+			Type: eng.Type,
+			Unit: unit,
+		}
+		result = append(result, svc)
+	}
 
-var engines = []engine{
-	{
-		name:       "PostgreSQL",
-		prefixes:   []string{"postgresql", "postgres"},
-		processPat: "postgres",
-		icon:       fyne.NewStaticResource("postgres.svg", postgresSvg),
-		color:      "#336791",
-	},
-	{
-		name:       "MySQL",
-		prefixes:   []string{"mysql", "mariadb"},
-		processPat: "mysqld",
-		icon:       fyne.NewStaticResource("mysql.svg", mysqlSvg),
-		color:      "#00758F",
-	},
-	{
-		name:       "Redis",
-		prefixes:   []string{"redis", "redis-server"},
-		processPat: "redis-server",
-		icon:       fyne.NewStaticResource("redis.svg", redisSvg),
-		color:      "#DC382D",
-	},
+	return result
 }
 
-/* ----------  service row  ---------- */
+func refreshService(svc *DBService) {
+	svc.Status = getServiceStatus(svc.Unit)
+	svc.PID = getServicePID(svc.Unit)
 
-type serviceRow struct {
-	engine      engine
-	unit        string
-	pid         string
-	port        int
-	status      string
-	icon        *widget.Icon
-	nameLabel   *canvas.Text
-	statusLabel *canvas.Text
-	portLabel   *canvas.Text
-	pidLabel    *canvas.Text
-	actionBtn   *widget.Button
-	row         *fyne.Container
-}
-
-func (s *serviceRow) buildUI() {
-	s.icon = widget.NewIcon(s.engine.icon)
-	s.icon.Resize(fyne.NewSize(20, 20))
-
-	s.nameLabel = canvas.NewText(s.engine.name, &color.RGBA{R: 204, G: 204, B: 204, A: 255})
-	s.nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-
-	s.statusLabel = canvas.NewText("...", &color.RGBA{R: 204, G: 204, B: 204, A: 255})
-	s.statusLabel.Alignment = fyne.TextAlignCenter
-
-	s.portLabel = canvas.NewText("Port: -", &color.RGBA{R: 204, G: 204, B: 204, A: 255})
-	s.portLabel.Alignment = fyne.TextAlignCenter
-
-	s.pidLabel = canvas.NewText("PID: -", &color.RGBA{R: 204, G: 204, B: 204, A: 255})
-	s.pidLabel.Alignment = fyne.TextAlignCenter
-
-	s.actionBtn = widget.NewButton("Start", nil)
-	s.actionBtn.Importance = widget.HighImportance
-
-	infoContainer := container.NewGridWithColumns(4,
-		s.nameLabel,
-		s.statusLabel,
-		s.portLabel,
-		s.pidLabel,
-	)
-
-	s.row = container.NewBorder(nil, nil, s.icon, s.actionBtn, infoContainer)
-
-	s.updateUI()
-}
-
-func (s *serviceRow) refresh() {
-	oldStatus := s.status
-	s.status = run("systemctl", "is-active", s.unit)
-	s.pid = getServicePID(s.unit)
-
-	if s.status == "active" {
-		s.port = listeningPort(s.pid, s.unit)
+	if svc.Status == "active" {
+		svc.Port = getPort(svc.PID, svc.Unit)
 	} else {
-		s.port = 0
-		s.pid = ""
+		svc.Port = 0
+		svc.PID = ""
 	}
-
-	if oldStatus != s.status && oldStatus != "" {
-		switch s.status {
-		case "active":
-			appLogger.Info("Service %s started", s.engine.name)
-		case "inactive":
-			appLogger.Info("Service %s stopped", s.engine.name)
-		case "failed":
-			appLogger.Error("Service %s failed", s.engine.name)
-		}
-	}
-
-	s.updateUI()
 }
 
-func (s *serviceRow) updateUI() {
-	var statusColor *color.RGBA
-	switch s.status {
+func parseColorHex(s string) color.Color {
+	var r, g, b uint64
+	fmt.Sscanf(s, "#%02x%02x%02x", &r, &g, &b)
+	return &color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}
+}
+
+func logActivity(msg, level string) {
+	c := parseColorHex("#22c55e")
+	if level == "error" {
+		c = parseColorHex("#ef4444")
+	} else if level == "warn" {
+		c = parseColorHex("#f97316")
+	}
+	entry := ActivityEntry{
+		Time:  time.Now().Format("15:04:05"),
+		Level: strings.ToUpper(level),
+		Msg:   msg,
+		Color: c,
+	}
+	activity = append(activity, entry)
+	if len(activity) > 50 {
+		activity = activity[len(activity)-50:]
+	}
+	refreshActivityList()
+}
+
+func buildServiceRow(svc *DBService) *serviceRowInfo {
+	refreshService(svc)
+
+	nameLabel := canvas.NewText(svc.Name, theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark))
+	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+	nameLabel.TextSize = 14
+
+	statusLabel := canvas.NewText("", parseColorHex("#888888"))
+	statusLabel.TextSize = 12
+
+	switch svc.Status {
 	case "active":
-		s.statusLabel.Text = "Running"
-		statusColor = &color.RGBA{R: 16, G: 185, B: 129, A: 255}
-		s.actionBtn.SetText("Stop")
-		s.actionBtn.Importance = widget.DangerImportance
-		s.actionBtn.OnTapped = func() {
-			appLogger.Info("Stopping %s...", s.engine.name)
-			run("pkexec", "systemctl", "stop", s.unit)
-			time.Sleep(500 * time.Millisecond)
-			s.refresh()
-		}
+		statusLabel.Text = fmt.Sprintf("Running :%d", svc.Port)
+		statusLabel.Color = parseColorHex("#22c55e")
 	case "inactive":
-		s.statusLabel.Text = "Stopped"
-		statusColor = &color.RGBA{R: 204, G: 204, B: 204, A: 255}
-		s.actionBtn.SetText("Start")
-		s.actionBtn.Importance = widget.HighImportance
-		s.actionBtn.OnTapped = func() {
-			appLogger.Info("Starting %s...", s.engine.name)
-			run("pkexec", "systemctl", "start", s.unit)
-			time.Sleep(500 * time.Millisecond)
-			s.refresh()
-		}
+		statusLabel.Text = "Stopped"
+		statusLabel.Color = parseColorHex("#ef4444")
 	case "failed":
-		s.statusLabel.Text = "Failed"
-		statusColor = &color.RGBA{R: 239, G: 68, B: 68, A: 255}
-		s.actionBtn.SetText("Restart")
-		s.actionBtn.Importance = widget.WarningImportance
-		s.actionBtn.OnTapped = func() {
-			appLogger.Info("Restarting %s...", s.engine.name)
-			run("pkexec", "systemctl", "restart", s.unit)
-			time.Sleep(500 * time.Millisecond)
-			s.refresh()
-		}
+		statusLabel.Text = "Failed"
+		statusLabel.Color = parseColorHex("#f97316")
 	default:
-		s.statusLabel.Text = "Unknown"
-		statusColor = &color.RGBA{R: 204, G: 204, B: 204, A: 255}
-		s.actionBtn.SetText("Refresh")
-		s.actionBtn.Importance = widget.MediumImportance
-		s.actionBtn.OnTapped = func() {
-			s.refresh()
-		}
-	}
-	if statusColor != nil {
-		s.statusLabel.Color = statusColor
-		s.statusLabel.Refresh()
+		statusLabel.Text = "Unknown"
+		statusLabel.Color = parseColorHex("#888888")
 	}
 
-	if s.port != 0 {
-		s.portLabel.Text = fmt.Sprintf("Port: %d", s.port)
-	} else {
-		s.portLabel.Text = "Port: -"
+	btnText := "Start"
+	btnImp := widget.HighImportance
+	if svc.Status == "active" {
+		btnText = "Stop"
+		btnImp = widget.DangerImportance
 	}
-	s.portLabel.Refresh()
 
-	if s.pid != "" {
-		s.pidLabel.Text = fmt.Sprintf("PID: %s", s.pid)
-	} else {
-		s.pidLabel.Text = "PID: -"
-	}
-	s.pidLabel.Refresh()
+	btn := widget.NewButton(btnText, nil)
+	btn.Importance = btnImp
+
+	row := container.NewGridWithColumns(4, nameLabel, statusLabel, widget.NewLabel(""), btn)
+
+	return &serviceRowInfo{svc: svc, row: row, name: nameLabel, status: statusLabel, btn: btn}
 }
 
-/* ----------  main  ---------- */
+func refreshServiceRows() {
+	for _, info := range serviceRows {
+		refreshService(info.svc)
+		switch info.svc.Status {
+		case "active":
+			info.status.Text = fmt.Sprintf("Running :%d", info.svc.Port)
+			info.status.Color = parseColorHex("#22c55e")
+			info.btn.SetText("Stop")
+			info.btn.Importance = widget.DangerImportance
+		case "inactive":
+			info.status.Text = "Stopped"
+			info.status.Color = parseColorHex("#ef4444")
+			info.btn.SetText("Start")
+			info.btn.Importance = widget.HighImportance
+		case "failed":
+			info.status.Text = "Failed"
+			info.status.Color = parseColorHex("#f97316")
+		default:
+			info.status.Text = "Unknown"
+			info.status.Color = parseColorHex("#888888")
+		}
+		info.status.Refresh()
+		info.btn.Refresh()
+	}
+}
+
+func toggleService(info *serviceRowInfo) {
+	if info.svc.Status == "active" {
+		logActivity("Stopping "+info.svc.Name+"...", "info")
+		run("pkexec", "systemctl", "stop", info.svc.Unit)
+	} else {
+		logActivity("Starting "+info.svc.Name+"...", "info")
+		run("pkexec", "systemctl", "start", info.svc.Unit)
+	}
+	time.Sleep(500 * time.Millisecond)
+	refreshServiceRows()
+	if info.svc.Status == "active" {
+		logActivity(info.svc.Name+" stopped", "info")
+	} else {
+		logActivity(info.svc.Name+" started", "info")
+	}
+}
+
+func refreshActivityList() {
+	if activityBox == nil {
+		return
+	}
+	activityBox.Objects = nil
+
+	if len(activity) == 0 {
+		empty := canvas.NewText("No activity yet", parseColorHex("#888888"))
+		empty.TextSize = 14
+		activityBox.Add(empty)
+	} else {
+		for _, entry := range activity {
+			text := canvas.NewText(fmt.Sprintf("[%s] %s: %s", entry.Time, entry.Level, entry.Msg), entry.Color)
+			text.TextSize = 12
+			text.TextStyle = fyne.TextStyle{Monospace: true}
+			activityBox.Add(text)
+		}
+	}
+	activityBox.Refresh()
+}
 
 func main() {
 	a := app.New()
-	appLogger = newLogger()
-	appLogger.Info("DBStat starting...")
+	logActivity("DBStat starting...", "info")
 
-	w := a.NewWindow("DBStat - Database Services Manager")
-	w.Resize(fyne.NewSize(500, 500))
-	w.SetFixedSize(false)
+	w := a.NewWindow("DBStat")
+	w.Resize(fyne.NewSize(450, 480))
 
-	headerTitle := widget.NewLabel("Database Services Manager")
-	headerTitle.TextStyle = fyne.TextStyle{Bold: true}
-	headerTitle.Alignment = fyne.TextAlignCenter
+	title := widget.NewLabel("DBStat")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Alignment = fyne.TextAlignCenter
 
-	refreshBtn := widget.NewButtonWithIcon("Refresh All", theme.ViewRefreshIcon(), nil)
+	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
+		refreshServiceRows()
+		logActivity("Services refreshed", "info")
+	})
 
-	header := container.NewBorder(nil, nil, headerTitle, refreshBtn)
-
-	var rows []*serviceRow
-	serviceList := container.NewVBox()
-
-	for _, eng := range engines {
-		unit, ok := findUnit(eng.prefixes)
-		if !ok {
-			continue
+	themeBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+		s := a.Settings()
+		if isDarkMode {
+			s.SetTheme(theme.LightTheme())
+			for _, info := range serviceRows {
+				info.name.Color = theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantLight)
+				info.name.Refresh()
+			}
+		} else {
+			s.SetTheme(theme.DarkTheme())
+			for _, info := range serviceRows {
+				info.name.Color = theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark)
+				info.name.Refresh()
+			}
 		}
-		row := &serviceRow{engine: eng, unit: unit}
-		row.buildUI()
-		serviceList.Add(row.row)
-		rows = append(rows, row)
-		appLogger.Info("Detected %s service: %s", eng.name, unit)
+		isDarkMode = !isDarkMode
+	})
+
+	header := container.NewBorder(nil, nil, title, container.NewHBox(refreshBtn, themeBtn))
+
+	svcList := detectServices()
+	logActivity(fmt.Sprintf("Found %d services", len(svcList)), "info")
+
+	dbListBox := container.NewVBox()
+
+	if len(svcList) == 0 {
+		empty := widget.NewLabel("No database services found")
+		empty.TextStyle = fyne.TextStyle{Bold: true}
+		dbListBox.Add(container.NewCenter(empty))
+		logActivity("No services detected", "warn")
+	} else {
+		for _, svc := range svcList {
+			info := buildServiceRow(svc)
+			info.btn.OnTapped = func() { toggleService(info) }
+			serviceRows = append(serviceRows, *info)
+			dbListBox.Add(info.row)
+		}
 	}
 
-	if len(rows) == 0 {
-		noServices := widget.NewLabel("No supported database services found")
-		noServices.Alignment = fyne.TextAlignCenter
-		noServices.TextStyle = fyne.TextStyle{Bold: true}
-		serviceList.Add(container.NewCenter(noServices))
-		appLogger.Warn("No database services detected")
-	}
-
-	scroll := container.NewScroll(serviceList)
-	scroll.SetMinSize(fyne.NewSize(0, 200))
+	serviceList = container.NewScroll(dbListBox)
+	serviceList.SetMinSize(fyne.NewSize(0, 120))
 
 	logTitle := widget.NewLabel("Activity Log")
 	logTitle.TextStyle = fyne.TextStyle{Bold: true}
 
-	clearLogBtn := widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), nil)
-	clearLogBtn.Importance = widget.LowImportance
+	btnClear := widget.NewButton("Clear", func() {
+		activity = nil
+		refreshActivityList()
+		logActivity("Log cleared", "info")
+	})
 
-	logHeader := container.NewBorder(nil, nil, logTitle, clearLogBtn)
+	logHeader := container.NewBorder(nil, nil, logTitle, btnClear)
 
-	logScrollBg := canvas.NewRectangle(fyne.CurrentApp().Settings().Theme().Color("background", 0))
-	logScrollBg.SetMinSize(fyne.NewSize(0, 250))
-	logScrollContainer := container.NewStack(
-		logScrollBg,
-		appLogger.text,
-	)
-
-	logContent := container.NewVBox(
-		logHeader,
-		logScrollContainer,
-	)
-
-	clearLogBtn.OnTapped = func() {
-		if appLogger == nil || appLogger.text == nil {
-			return
-		}
-		vbox := appLogger.text.Content.(*fyne.Container)
-		vbox.Objects = nil
-		appLogger.text.Refresh()
-	}
-
-	refreshBtn.OnTapped = func() {
-		appLogger.Info("Refreshing all services...")
-		for _, row := range rows {
-			row.refresh()
-		}
-	}
+	activityBox = container.NewVBox()
+	activityList := container.NewScroll(activityBox)
+	activityList.SetMinSize(fyne.NewSize(0, 150))
+	refreshActivityList()
 
 	mainContent := container.NewVBox(
 		header,
 		widget.NewSeparator(),
-		scroll,
+		serviceList,
 		widget.NewSeparator(),
-		logContent,
+		logHeader,
+		activityList,
 	)
 
-	paddedContent := container.NewPadded(mainContent)
-	w.SetContent(paddedContent)
-
-	for _, row := range rows {
-		row.refresh()
-	}
+	padded := container.NewPadded(mainContent)
+	w.SetContent(padded)
 
 	w.ShowAndRun()
 }
