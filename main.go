@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"image/color"
 	"os/exec"
@@ -13,9 +14,19 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
+
+//go:embed assets/postgres.svg
+var postgresSvg []byte
+
+//go:embed assets/mysql.svg
+var mysqlSvg []byte
+
+//go:embed assets/redis.svg
+var redisSvg []byte
 
 type DBService struct {
 	Name   string
@@ -45,6 +56,7 @@ var (
 type serviceRowInfo struct {
 	svc    *DBService
 	row    *fyne.Container
+	icon   *canvas.Image
 	name   *canvas.Text
 	status *canvas.Text
 	port   *canvas.Text
@@ -197,9 +209,25 @@ func logActivity(msg, level string) {
 func buildServiceRow(svc *DBService) *serviceRowInfo {
 	refreshService(svc)
 
+	var iconRes fyne.Resource
+	switch svc.Type {
+	case "postgres":
+		iconRes = fyne.NewStaticResource("postgres.svg", postgresSvg)
+	case "mysql":
+		iconRes = fyne.NewStaticResource("mysql.svg", mysqlSvg)
+	case "redis":
+		iconRes = fyne.NewStaticResource("redis.svg", redisSvg)
+	}
+
+	icon := canvas.NewImageFromResource(iconRes)
+	icon.FillMode = canvas.ImageFillContain
+
+	iconContainer := container.NewGridWrap(fyne.NewSize(32, 32), icon)
+
 	nameLabel := canvas.NewText(svc.Name, theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark))
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-	nameLabel.TextSize = 14
+	nameLabel.TextSize = 12
+	nameLabelCenter := container.NewCenter(nameLabel)
 
 	statusLabel := canvas.NewText("", parseColorHex("#888888"))
 	statusLabel.TextSize = 12
@@ -218,6 +246,7 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 		statusLabel.Text = "Unknown"
 		statusLabel.Color = parseColorHex("#888888")
 	}
+	statusLabelCenter := container.NewCenter(statusLabel)
 
 	btnText := "Start"
 	btnImp := widget.HighImportance
@@ -227,11 +256,19 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 	}
 
 	btn := widget.NewButton(btnText, nil)
+
 	btn.Importance = btnImp
+	btnContainer := container.NewGridWrap(fyne.NewSize(70, 30), btn)
+	leftSide := container.NewHBox(
+		iconContainer,
+		nameLabelCenter,
+		layout.NewSpacer(),
+		statusLabelCenter,
+	)
+	row := container.NewBorder(nil, nil, nil, btnContainer, leftSide)
+	// row := container.NewGridWithColumns(4, icon, nameLabel, statusLabel, btn)
 
-	row := container.NewGridWithColumns(4, nameLabel, statusLabel, widget.NewLabel(""), btn)
-
-	return &serviceRowInfo{svc: svc, row: row, name: nameLabel, status: statusLabel, btn: btn}
+	return &serviceRowInfo{svc: svc, row: row, icon: icon, name: nameLabel, status: statusLabel, btn: btn}
 }
 
 func refreshServiceRows() {
@@ -303,7 +340,7 @@ func main() {
 	logActivity("DBStat starting...", "info")
 
 	w := a.NewWindow("DBStat")
-	w.Resize(fyne.NewSize(450, 480))
+	w.Resize(fyne.NewSize(500, 480))
 
 	title := widget.NewLabel("DBStat")
 	title.TextStyle = fyne.TextStyle{Bold: true}
