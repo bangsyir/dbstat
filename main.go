@@ -220,9 +220,8 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 	}
 
 	icon := canvas.NewImageFromResource(iconRes)
-	icon.FillMode = canvas.ImageFillOriginal
-
-	iconContainer := container.NewGridWrap(fyne.NewSize(33, 32), icon)
+	icon.FillMode = canvas.ImageFillContain
+	icon.SetMinSize(fyne.NewSize(32, 32))
 
 	nameLabel := canvas.NewText(svc.Name, theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark))
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
@@ -261,7 +260,7 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 	btnContainer := container.NewGridWrap(fyne.NewSize(70, 30), btn)
 
 	leftSide := container.NewHBox(
-		iconContainer,
+		icon,
 		labelPadding,
 	)
 	row := container.NewBorder(nil, nil, nil, btnContainer, leftSide)
