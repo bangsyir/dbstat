@@ -220,14 +220,13 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 	}
 
 	icon := canvas.NewImageFromResource(iconRes)
-	icon.FillMode = canvas.ImageFillContain
+	icon.FillMode = canvas.ImageFillOriginal
 
-	iconContainer := container.NewGridWrap(fyne.NewSize(32, 32), icon)
+	iconContainer := container.NewGridWrap(fyne.NewSize(33, 32), icon)
 
 	nameLabel := canvas.NewText(svc.Name, theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark))
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
 	nameLabel.TextSize = 12
-	nameLabelCenter := container.NewCenter(nameLabel)
 
 	statusLabel := canvas.NewText("", parseColorHex("#888888"))
 	statusLabel.TextSize = 12
@@ -246,8 +245,9 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 		statusLabel.Text = "Unknown"
 		statusLabel.Color = parseColorHex("#888888")
 	}
-	statusLabelCenter := container.NewCenter(statusLabel)
 
+	labelList := container.NewHBox(nameLabel, statusLabel)
+	labelPadding := container.New(layout.NewCustomPaddedLayout(0, 4, 10, 0), labelList)
 	btnText := "Start"
 	btnImp := widget.HighImportance
 	if svc.Status == "active" {
@@ -259,11 +259,10 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 
 	btn.Importance = btnImp
 	btnContainer := container.NewGridWrap(fyne.NewSize(70, 30), btn)
+
 	leftSide := container.NewHBox(
 		iconContainer,
-		nameLabelCenter,
-		layout.NewSpacer(),
-		statusLabelCenter,
+		labelPadding,
 	)
 	row := container.NewBorder(nil, nil, nil, btnContainer, leftSide)
 	// row := container.NewGridWithColumns(4, icon, nameLabel, statusLabel, btn)
