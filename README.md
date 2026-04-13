@@ -1,14 +1,14 @@
-# DB Start
+# DBStat
 
-DB Start is a simple Fyne GUI application designed to manage the status of common database engines (PostgreSQL, MySQL/MariaDB, Redis) on Linux systems using `systemctl`. It provides a graphical interface to start, stop, or restart these services and displays their current status and listening port.
+DBStat is a desktop application for monitoring and managing database services (PostgreSQL, MySQL/MariaDB, Redis) on Linux systems using systemd. It provides a GUI to view service status, ports, and control (start/stop/restart) these services.
 
 ## Features
 
-- **Discover Database Services**: Automatically identifies installed PostgreSQL, MySQL/MariaDB, and Redis services.
-- **Systemctl Integration**: Uses `systemctl` to control services (start, stop, restart).
-- **Real-time Status Display**: Shows the active status (running, inactive, failed) and listening port of each service.
-- **Fyne GUI**: A cross-platform GUI built with the Fyne toolkit.
-- **`pkexec` for Permissions**: Leverages `pkexec` to securely execute `systemctl` commands that require root privileges.
+- **Service Discovery**: Automatically detects installed PostgreSQL, MySQL/MariaDB, and Redis services via systemd.
+- **Status Monitoring**: Displays real-time status (active/inactive/failed), PID, and listening port for each service.
+- **Service Control**: Start, stop, or restart services directly from the GUI using `pkexec` for privilege escalation.
+- **Fyne GUI**: Cross-platform desktop GUI built with the Fyne toolkit.
+- **Activity Log**: Shows real-time log entries for service operations.
 
 ## Supported Database Engines
 
@@ -18,58 +18,62 @@ DB Start is a simple Fyne GUI application designed to manage the status of commo
 
 ## Prerequisites
 
-- **Linux Operating System**: This application is designed for Linux environments.
-- **`systemd`**: Services are managed via `systemd`.
-- **`systemctl`**: Command-line interface for `systemd`.
-- **`pkexec`**: For privilege escalation to manage services.
-- **`ss`**: For checking listening ports.
-- **Go**: To build and run the application.
-- **Fyne Dependencies**: Required libraries for Fyne applications.
-
-  On Debian/Ubuntu-based systems, you might need:
-
-  ```/dev/null/install_deps.sh
-  sudo apt-get update
-  sudo apt-get install build-essential libgl1-mesa-dev xorg-dev
-  ```
-
-  For other distributions, refer to the [Fyne documentation](https://developer.fyne.io/started/dependencies).
+- **Linux**: This application runs on Linux with systemd.
+- **Go 1.24+**: To build the application.
+- **Fyne Dependencies**: See [Fyne Quick Start](https://docs.fyne.io/started/quick/) for installation instructions.
 
 ## Installation and Running
 
 1.  **Clone the repository**:
 
-    ```/dev/null/clone.sh
+    ```bash
     git clone https://github.com/bangsyir/dbstat.git
     cd dbstat
     ```
 
-2.  **Build the application**:
+2.  **Install dependencies**:
 
-    This script compiles the application and creates an executable binary in the `build/` directory, along with a desktop entry and icon.
+    ```bash
+    go mod tidy
+    ```
 
-    ```dbstat/build.sh
+3.  **Build the application**:
+
+    ```bash
+    go build -o dbstat main.go
+    ```
+
+    Or use the build script for release artifacts:
+
+    ```bash
     ./build.sh
     ```
 
-3.  **Install the application (optional)**:
+4.  **Install the application (optional)**:
 
-    This script installs the built application, its desktop entry, and icon into your user's local directories (`~/.local/bin`, `~/.local/share/applications`, `~/.local/share/icons`). This makes it available in your system's application menu.
-
-    ```dbstat/install.sh
-    ./install.sh
+    ```bash
+    sudo ./install.sh
     ```
 
-4.  **Run the application**:
-    - If you ran `./install.sh`, you can find "DB Stat Manager" in your desktop environment's application menu.
-    - Alternatively, you can run the application directly from the build directory:
+    This installs to `/usr/local/bin` and creates a desktop entry.
 
-      ```/dev/null/run_from_build.sh
-      ./build/dbstat
-      ```
+5.  **Run the application**:
+
+    ```bash
+    ./dbstat
+    ```
+
+    Or find "DB Stat Manager" in your desktop environment's application menu if installed.
 
 ## Usage
 
-Upon running the application, a window will appear displaying a list of detected database services. Each row will show:
+Upon launching, the application displays detected database services in a list. Each row shows:
 
-- The database
+- Service icon and name
+- Status indicator (active/inactive/failed)
+- Listening port
+- Control button to start/stop/restart
+
+The activity panel at the bottom displays real-time log entries for all operations.
+
+The application auto-refreshes service status every few seconds. To control services, click the action button and enter your password when prompted via the polkit dialog.
