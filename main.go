@@ -188,9 +188,10 @@ func parseColorHex(s string) color.Color {
 
 func logActivity(msg, level string) {
 	c := parseColorHex("#22c55e")
-	if level == "error" {
+	switch level {
+	case "error":
 		c = parseColorHex("#ef4444")
-	} else if level == "warn" {
+	case "warn":
 		c = parseColorHex("#f97316")
 	}
 	entry := ActivityEntry{
@@ -306,9 +307,9 @@ func toggleService(info *serviceRowInfo) {
 	time.Sleep(500 * time.Millisecond)
 	refreshServiceRows()
 	if info.svc.Status == "active" {
-		logActivity(info.svc.Name+" stopped", "info")
-	} else {
 		logActivity(info.svc.Name+" started", "info")
+	} else {
+		logActivity(info.svc.Name+" stoped", "info")
 	}
 }
 
