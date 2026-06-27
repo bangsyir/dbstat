@@ -1,15 +1,16 @@
 package main
 
 import (
-	_ "embed"
+	"encoding/json"
 	"fmt"
 	"image/color"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
@@ -19,23 +20,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-//go:embed assets/postgres.svg
-var postgresSvg []byte
-
-//go:embed assets/mysql.svg
-var mysqlSvg []byte
-
-//go:embed assets/redis.svg
-var redisSvg []byte
-
 type DBService struct {
-	Name   string
-	Type   string
-	Unit   string
-	Status string
-	PID    string
-	Port   int
-	Color  string
+	Name        string
+	Type        string
+	Unit        string
+	Status      string
+	PID         string
+	Port        int
+	DefaultPort int
 }
 
 type ActivityEntry struct {
@@ -54,13 +46,12 @@ var (
 )
 
 type serviceRowInfo struct {
-	svc    *DBService
-	row    *fyne.Container
-	icon   *canvas.Image
-	name   *canvas.Text
-	status *canvas.Text
-	port   *canvas.Text
-	btn    *widget.Button
+	svc      *DBService
+	row      *fyne.Container
+	name     *canvas.Text
+	status   *canvas.Text
+	resource *canvas.Text
+	btn      *widget.Button
 }
 
 func run(args ...string) string {
@@ -94,7 +85,7 @@ func getServicePID(unit string) string {
 	return ""
 }
 
-func getPort(pid, unit string) int {
+func getPort(pid, unit string, defaultPort int) int {
 	unit = strings.TrimSuffix(unit, ".service")
 
 	if pid != "" && pid != "0" {
@@ -109,15 +100,7 @@ func getPort(pid, unit string) int {
 		return p
 	}
 
-	switch {
-	case strings.Contains(unit, "postgres"):
-		return 5432
-	case strings.Contains(unit, "mysql"), strings.Contains(unit, "mariadb"):
-		return 3306
-	case strings.Contains(unit, "redis"):
-		return 6379
-	}
-	return 0
+	return defaultPort
 }
 
 func extractPort(out string) int {
@@ -138,33 +121,54 @@ func getServiceStatus(unit string) string {
 	return run("systemctl", "is-active", unit)
 }
 
+type ServiceConfig struct {
+	Name     string   `json:"name"`
+	Type     string   `json:"type"`
+	Prefixes []string `json:"prefixes"`
+	Port     int      `json:"port"`
+}
+
+func loadServiceConfig() []ServiceConfig {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "dbstat", "services.json"))
+	if err != nil {
+		return nil
+	}
+	var configs []ServiceConfig
+	if err := json.Unmarshal(data, &configs); err != nil {
+		return nil
+	}
+	return configs
+}
+
 func detectServices() []*DBService {
-	engines := []struct {
-		Name     string
-		Type     string
-		Prefixes []string
-		Color    string
-	}{
-		{"PostgreSQL", "postgres", []string{"postgresql", "postgres"}, "#336791"},
-		{"MySQL", "mysql", []string{"mysql", "mariadb"}, "#00758F"},
-		{"Redis", "redis", []string{"redis", "redis-server"}, "#DC382D"},
+	configs := loadServiceConfig()
+	if configs == nil {
+		// ponytail: built-in defaults when no config file
+		configs = []ServiceConfig{
+			{"PostgreSQL", "postgres", []string{"postgresql", "postgres"}, 5432},
+			{"MySQL", "mysql", []string{"mysql", "mariadb"}, 3306},
+			{"Redis", "redis", []string{"redis", "redis-server"}, 6379},
+		}
 	}
 
 	var result []*DBService
-
-	for _, eng := range engines {
-		unit := findUnit(eng.Prefixes)
+	for _, c := range configs {
+		unit := findUnit(c.Prefixes)
 		if unit == "" {
 			continue
 		}
 		svc := &DBService{
-			Name: eng.Name,
-			Type: eng.Type,
-			Unit: unit,
+			Name:        c.Name,
+			Type:        c.Type,
+			Unit:        unit,
+			DefaultPort: c.Port,
 		}
 		result = append(result, svc)
 	}
-
 	return result
 }
 
@@ -173,11 +177,23 @@ func refreshService(svc *DBService) {
 	svc.PID = getServicePID(svc.Unit)
 
 	if svc.Status == "active" {
-		svc.Port = getPort(svc.PID, svc.Unit)
+		svc.Port = getPort(svc.PID, svc.Unit, svc.DefaultPort)
 	} else {
 		svc.Port = 0
 		svc.PID = ""
 	}
+}
+
+func getResourceUsage(pid string) string {
+	if pid == "" || pid == "0" {
+		return ""
+	}
+	out := run("ps", "-p", pid, "-o", "%cpu,%mem", "--no-headers")
+	fields := strings.Fields(out)
+	if len(fields) >= 2 {
+		return fmt.Sprintf("CPU:%s%% MEM:%s%%", fields[0], fields[1])
+	}
+	return ""
 }
 
 func parseColorHex(s string) color.Color {
@@ -209,21 +225,6 @@ func logActivity(msg, level string) {
 
 func buildServiceRow(svc *DBService) *serviceRowInfo {
 	refreshService(svc)
-
-	var iconRes fyne.Resource
-	switch svc.Type {
-	case "postgres":
-		iconRes = fyne.NewStaticResource("postgres.svg", postgresSvg)
-	case "mysql":
-		iconRes = fyne.NewStaticResource("mysql.svg", mysqlSvg)
-	case "redis":
-		iconRes = fyne.NewStaticResource("redis.svg", redisSvg)
-	}
-
-	icon := canvas.NewImageFromResource(iconRes)
-	icon.FillMode = canvas.ImageFillContain
-	icon.SetMinSize(fyne.NewSize(32, 32))
-
 	nameLabel := canvas.NewText(svc.Name, theme.DefaultTheme().Color(theme.ColorNameForeground, theme.VariantDark))
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
 	nameLabel.TextSize = 12
@@ -246,6 +247,11 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 		statusLabel.Color = parseColorHex("#888888")
 	}
 
+	// ponytail: resource usage text, blank when inactive
+	resourceText := canvas.NewText("", parseColorHex("#888888"))
+	resourceText.TextSize = 12
+	resourceText.TextStyle = fyne.TextStyle{Monospace: true}
+
 	labelList := container.NewHBox(nameLabel, statusLabel)
 	labelPadding := container.New(layout.NewCustomPaddedLayout(0, 4, 10, 0), labelList)
 	btnText := "Start"
@@ -261,13 +267,12 @@ func buildServiceRow(svc *DBService) *serviceRowInfo {
 	btnContainer := container.NewGridWrap(fyne.NewSize(70, 30), btn)
 
 	leftSide := container.NewHBox(
-		icon,
 		labelPadding,
+		resourceText,
 	)
 	row := container.NewBorder(nil, nil, nil, btnContainer, leftSide)
-	// row := container.NewGridWithColumns(4, icon, nameLabel, statusLabel, btn)
 
-	return &serviceRowInfo{svc: svc, row: row, icon: icon, name: nameLabel, status: statusLabel, btn: btn}
+	return &serviceRowInfo{svc: svc, row: row, name: nameLabel, status: statusLabel, resource: resourceText, btn: btn}
 }
 
 func refreshServiceRows() {
@@ -291,6 +296,12 @@ func refreshServiceRows() {
 			info.status.Text = "Unknown"
 			info.status.Color = parseColorHex("#888888")
 		}
+		if info.svc.Status == "active" {
+			info.resource.Text = getResourceUsage(info.svc.PID)
+		} else {
+			info.resource.Text = ""
+		}
+		info.resource.Refresh()
 		info.status.Refresh()
 		info.btn.Refresh()
 	}
@@ -419,6 +430,14 @@ func main() {
 
 	padded := container.NewPadded(mainContent)
 	w.SetContent(padded)
+
+	// ponytail: goroutine dies with process, no cleanup needed
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		for range ticker.C {
+			fyne.Do(refreshServiceRows)
+		}
+	}()
 
 	w.ShowAndRun()
 }
