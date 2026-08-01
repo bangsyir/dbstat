@@ -62,7 +62,12 @@ func run(args ...string) string {
 
 func findUnit(prefixes []string) string {
 	for _, p := range prefixes {
-		out := run("systemctl", "list-unit-files", p+"*.service", "-q", "--no-legend")
+		// exact unit first: redis.service over redis-sentinel.service
+		out := run("systemctl", "list-unit-files", p+".service", "-q", "--no-legend")
+		if out != "" {
+			return strings.Fields(out)[0]
+		}
+		out = run("systemctl", "list-unit-files", p+"*.service", "-q", "--no-legend")
 		if out != "" {
 			return strings.Fields(out)[0]
 		}
